@@ -205,7 +205,7 @@ input{font:inherit}
   <div class="combo" id="combo">连对 ×0</div>
 </div>
 <main id="view"><div class="loading"><div style="font-size:34px">📚</div><div>正在加载词库…</div></div></main>
-<div class="tools"><button id="tHome" aria-label="首页">🏠</button><button id="tSet" aria-label="设置">⚙️</button></div>
+<div class="tools"><button id="tHome" aria-label="回首页" style="visibility:hidden">🏠</button><button id="tSet" aria-label="设置">⚙️</button></div>
 <div id="toasts"></div>
 <div class="ov" id="lvl"><div class="big">LEVEL UP</div><div class="lv" id="lvlText">Lv.2</div></div>
 <div class="ov" id="sheet"><div class="panel" id="panel"></div></div>
@@ -244,7 +244,21 @@ if (!dev) { dev = 'ph-' + Math.random().toString(36).slice(2, 10); LS.set('cet6.
 // 单词状态与同步文件同一格式：[等级, 下次复习, 次数, 一次答对, 答错, 首次, 最近, 修改时间]
 const S = Object.assign({ words: {}, dayLocal: {}, dayRemote: {}, xpLocal: 0, xpRemote: {}, achv: [], best: 0, goal: '' }, LS.get('cet6.state', {}));
 const saveCfg = () => LS.set('cet6.cfg', cfg);
-const saveState = () => LS.set('cet6.state', S);
+// 保存前先和存储里已有的数据合并（同时开着两个页面时，旧页面不会把新进度覆盖掉）
+function saveState() {
+  const cur = LS.get('cet6.state', null);
+  if (cur && cur.words) {
+    try {
+      const days = {};
+      new Set(Object.keys(cur.dayLocal || {}).concat(Object.keys(cur.dayRemote || {}))).forEach(d => {
+        days[d] = Object.assign({}, (cur.dayRemote || {})[d] || {});
+        if (cur.dayLocal && cur.dayLocal[d]) days[d][dev] = cur.dayLocal[d];
+      });
+      mergeDoc({ words: cur.words, days, xp: Object.assign({ [dev]: cur.xpLocal || 0 }, cur.xpRemote || {}), achv: cur.achv, best: cur.best, goal: cur.goal });
+    } catch (e) {}
+  }
+  LS.set('cet6.state', S);
+}
 
 // 扫电脑上的二维码打开：#t=token（测试时还可以带 api=）
 (function readHash() {
@@ -379,23 +393,23 @@ function newWords(n) {
   else un.sort((a, b) => a.rank - b.rank);
   return un.slice(0, n);
 }
-function wrongWords() {
+// 错题本：错得多的优先；错的次数一样时，最久没练的优先（刚练过的排到后面，下次接着往后刷）
+function wrongList() {
   return Object.keys(S.words).filter(w => IDX[w] && S.words[w][4] >= 1 && S.words[w][0] <= 5)
-    .sort((a, b) => (S.words[b][4] - S.words[a][4]) || (S.words[b][6] > S.words[a][6] ? 1 : -1)).slice(0, 30).map(w => IDX[w]);
+    .sort((a, b) => (S.words[b][4] - S.words[a][4]) || (S.words[a][7] - S.words[b][7]));
+}
+function wrongWords() { return wrongList().slice(0, 30).map(w => IDX[w]); }
+// 快刷：先刷今天到期的，再按“最久没练过”往后轮，每轮 30 个，所有学过的词都会轮到
+function quickList() {
+  const t = today(), learned = Object.keys(S.words).filter(w => IDX[w] && S.words[w][0] >= 1 && S.words[w][0] <= 8);
+  const due = learned.filter(w => S.words[w][1] <= t).sort((a, b) => (S.words[a][1] < S.words[b][1] ? -1 : S.words[a][1] > S.words[b][1] ? 1 : 0) || (S.words[a][7] - S.words[b][7]));
+  const rest = learned.filter(w => S.words[w][1] > t).sort((a, b) => S.words[a][7] - S.words[b][7]);
+  return due.concat(rest);
 }
 function buildQueue(mode, extra) {
   const q = [], item = (w, k) => ({ w, kind: k });
   if (mode === 'wrong') return wrongWords().map(w => item(w, 'wrong'));
-  if (mode === 'quick') {
-    let list = dueWords();
-    if (list.length < 10) {
-      const seen = new Set(list.map(w => w.w));
-      const more = Object.keys(S.words).filter(w => IDX[w] && !seen.has(w) && S.words[w][0] >= 1 && S.words[w][0] <= 8)
-        .sort((a, b) => S.words[a][1] < S.words[b][1] ? -1 : 1).map(w => IDX[w]);
-      list = list.concat(more);
-    }
-    return list.slice(0, 30).map(w => item(w, 'quick'));
-  }
+  if (mode === 'quick') return quickList().slice(0, 30).map(w => item(IDX[w], 'quick'));
   const due = dueWords(), news = mode === 'review' ? [] : newWords(quota() + (extra || 0));
   let ri = 0, ni = 0;
   while (ri < due.length || ni < news.length) {
@@ -413,7 +427,11 @@ function updateState(w, grade, kind, secs) {
   s[2]++; s[6] = t; s[7] = Date.now();
   if (grade === 'kill') { s[0] = 9; s[1] = '9999-12-31'; addDay(5, 1); return; }
   addDay(isNew ? 0 : 1, 1);
-  if (grade === 'perfect') { s[3]++; addDay(2, 1); if (!keep) s[0] = isNew ? 3 : Math.min(s[0] + 1, 8); }
+  if (grade === 'perfect') {
+    s[3]++; addDay(2, 1);
+    if (!keep) s[0] = isNew ? 3 : Math.min(s[0] + 1, 8);
+    if (kind === 'wrong') s[4] = Math.max(0, s[4] - 1);     // 错题本里答对一次，错误次数减 1，减到 0 就移出错题本
+  }
   else if (grade === 'hard') { if (!keep) s[0] = isNew ? 1 : Math.max(1, s[0] - 1); }
   else { s[4]++; addDay(3, 1); s[0] = 1; }
   if (!keep || grade === 'fail') s[1] = addDays(t, IV[s[0]]);
@@ -699,28 +717,54 @@ function showResult(r, el) {
   el.classList.add(r.grade === 'perfect' || r.grade === 'kill' ? 'flash-good' : 'flash-warn');
   if (r.xp) floatText('+' + r.xp + ' XP', el);
 }
-function setView(name, html) { view = name; $('view').innerHTML = html; window.scrollTo(0, 0); }
+function setView(name, html) {
+  view = name; $('view').innerHTML = html; window.scrollTo(0, 0);
+  $('tHome').style.visibility = (name === 'home' || name === 'loading' || name === 'error') ? 'hidden' : 'visible';   // 🏠 只在练习中显示，用来回首页
+}
+
+/* ================= 放到桌面 ================= */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (view === 'home') renderHome(); });   // 安卓 Chrome 可以一键安装
+window.addEventListener('appinstalled', () => { installEvt = null; toast('已经放到桌面了'); if (view === 'home') renderHome(); });
+const isStandalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+function installCard() {
+  if (isStandalone() || cfg.hideInstall) return '';
+  const ua = navigator.userAgent;
+  const inApp = /MicroMessenger|QQ\/|UCBrowser|Quark|baiduboxapp|baidubrowser|SogouMobile|Weibo|DingTalk|AliApp|Toutiao|NewsArticle/i.test(ua);
+  const ios = /iPhone|iPad|iPod/i.test(ua);
+  let body;
+  if (inApp) body = '现在是在微信、百度等 App 自带的浏览器里打开的，没法放到桌面。点右上角 ··· 选“在浏览器中打开”，再按提示添加。'
+    + (ios ? '（iPhone 请用 Safari 打开）' : '');
+  else if (installEvt) body = '装到桌面后点图标直接打开，全屏、没有地址栏，没网也能用。<button class="primary" id="doInstall" style="margin:10px 0 0">📲 安装到桌面</button>';
+  else if (ios) body = '用 Safari 打开这个页面，点底部的<b>分享按钮</b>（方框加向上箭头），往下滑找<b>“添加到主屏幕”</b>。'
+    + '<br>注意：iPhone 会把桌面图标和 Safari 的数据分开存，第一次从桌面图标打开后，要在 ⚙️ 里再粘贴一次 token，进度会从云端同步回来。';
+  else body = '点浏览器菜单（右上角 ⋮ 或底部 ≡），选<b>“添加到主屏幕”</b>、<b>“添加到桌面”</b>或<b>“安装应用”</b>。之后点桌面图标直接打开，没网也能用。';
+  return '<div class="card"><div class="meta"><span class="tag">📲 放到手机桌面</span><button id="hideInstall" style="font-size:12px;color:var(--dim)">不再提示</button></div><div class="note">' + body + '</div></div>';
+}
 
 /* ================= 首页 ================= */
 function renderHome() {
   stopLoop(); sess = null; cur = null; header(); chipIdle();
-  const c = counts(), q = quota(), wrong = wrongWords().length, remain = c.total - c.learned;
+  const c = counts(), q = quota(), wrong = wrongList().length, remain = c.total - c.learned;
+  const ql = quickList(), quickLeft = ql.filter(w => S.words[w][6] !== today()).length;
   const finish = remain > 0 ? addDays(today(), Math.ceil(remain / Math.max(1, cfg.dailyNew))) : '';
   const syncLine = cfg.token
     ? '<div class="syncrow"><span class="note">云同步已开启' + (cfg.lastSync ? '' : '，还没同步过') + '</span><button id="hSync">立即同步</button></div>'
     : '<div class="syncrow"><span class="note">没开云同步：手机和电脑进度不会合并</span><button id="hSet">去设置</button></div>';
   const ask = cfg.soundAsked ? '' : '<div class="card"><div class="note">戴着耳机吗？开声音后会读单词（有网用真人发音）。</div><div class="ask"><button id="sOn">🎧 开声音</button><button id="sOff">🔇 先静音</button></div></div>';
-  setView('home', ask + '<section class="card home"><div class="meta"><span class="tag">今日任务</span><span>' + today() + '</span></div>'
+  setView('home', ask + installCard() + '<section class="card home"><div class="meta"><span class="tag">今日任务</span><span>' + today() + '</span></div>'
     + '<h2>复习 <b>' + c.due + '</b> · 新词 <b>' + q + '</b></h2>'
     + '<button class="primary" id="goSpell">✍️ 拼写练习</button>'
-    + '<button class="ghost2" id="goQuick">⚡ 快刷复习 <small>看英文选中文，单手刷</small></button>'
-    + '<button class="ghost2" id="goWrong">📕 错题本 <small>' + wrong + ' 个</small></button></section>'
+    + '<button class="ghost2" id="goQuick">⚡ 快刷复习 <small>' + (ql.length ? '今天还有 ' + quickLeft + ' 个没刷' : '看英文选中文，单手刷') + '</small></button>'
+    + '<button class="ghost2" id="goWrong">📕 错题本 <small>' + wrong + ' 个' + (wrong > 30 ? '（每轮 30 个）' : '') + '</small></button></section>'
     + '<section class="card"><div class="nums"><div><b>' + c.learned + '</b><span>已学 / ' + c.total + '</span></div><div><b>' + c.mastered + '</b><span>已掌握</span></div><div><b>' + streak() + '</b><span>连续打卡</span></div></div>'
     + (finish ? '<div class="note">按每天 ' + cfg.dailyNew + ' 个新词，预计 <b>' + finish + '</b> 学完全部新词</div>' : '<div class="note">全部新词都学过了，接下来按计划复习</div>')
     + '</section><section class="card">' + syncLine + '</section>');
   $('goSpell').onclick = () => startSession(c.due + q > 0 ? 'normal' : 'more');
   $('goQuick').onclick = () => startQuick();
   $('goWrong').onclick = () => { if (!wrong) { toast('错题本是空的：答错过的词会自动进来'); return; } startSession('wrong'); };
+  const di = $('doInstall'); if (di) di.onclick = async () => { if (!installEvt) return; installEvt.prompt(); try { await installEvt.userChoice; } catch (e) {} installEvt = null; renderHome(); };
+  const hi = $('hideInstall'); if (hi) hi.onclick = () => { cfg.hideInstall = true; saveCfg(); renderHome(); };
   const hs = $('hSync'); if (hs) hs.onclick = () => sync(false);
   const hset = $('hSet'); if (hset) hset.onclick = openSheet;
   const on = $('sOn'); if (on) on.onclick = () => { unlockAudio(); cfg.soundAsked = true; cfg.say = true; cfg.loop = true; cfg.sfx = true; saveCfg(); speak('ready', 0.9); renderHome(); };
@@ -816,6 +860,10 @@ function finish(grade) {
   updateState(w, grade, it.kind, secs);
   addXp(xp);
   if (combo > S.best) S.best = combo;
+  if (it.kind === 'wrong' && grade === 'perfect') {
+    const left = S.words[w.w][4];
+    toast(left === 0 ? '✅ ' + w.w + ' 已移出错题本' : w.w + ' 再答对 ' + left + ' 次就移出错题本');
+  }
   checkAchv({ grade, secs, len: w.w.length });
   if (it.kind !== 'relearn' && grade !== 'kill') { sess.n++; if (grade === 'perfect') sess.ok++; }
   saveState(); saveCfg();
@@ -849,7 +897,7 @@ function sessionDone() {
   setView('done', '<section class="card home"><div class="meta"><span class="tag review">完成</span><span>' + (sess.mode === 'wrong' ? '错题本' : '本轮') + '</span></div>'
     + '<h2>🎉 这一轮背完了</h2>' + bonus
     + '<div class="nums"><div><b>' + sess.n + '</b><span>答题</span></div><div><b>' + pct + '%</b><span>一次答对</span></div><div><b>+' + sess.xp + '</b><span>XP</span></div></div>'
-    + '<div class="note">用时约 ' + mins + ' 分钟。答错的词明天会再考。</div></section>'
+    + '<div class="note">用时约 ' + mins + ' 分钟。' + (sess.mode === 'quick' ? '下一轮会接着刷最久没练过的词。' : sess.mode === 'wrong' ? '错题本还剩 ' + wrongList().length + ' 个，下一轮接着刷没练过的。' : '答错的词明天会再考。') + '</div></section>'
     + (more ? '<button class="primary" id="dMore">再来 10 个新词</button>' : '') + '<button class="ghost" id="dHome">回首页</button>'
     + (lastRes ? '<section class="res" id="res"></section>' : ''));
   if (lastRes) { const el = $('res'); el.innerHTML = resultHtml(lastRes); el.querySelectorAll('[data-say]').forEach(b => b.onclick = () => speak(b.dataset.say === 'w' ? lastRes.w.w : lastRes.sent, 0.9)); }
