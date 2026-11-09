@@ -244,21 +244,7 @@ if (!dev) { dev = 'ph-' + Math.random().toString(36).slice(2, 10); LS.set('cet6.
 // 单词状态与同步文件同一格式：[等级, 下次复习, 次数, 一次答对, 答错, 首次, 最近, 修改时间]
 const S = Object.assign({ words: {}, dayLocal: {}, dayRemote: {}, xpLocal: 0, xpRemote: {}, achv: [], best: 0, goal: '' }, LS.get('cet6.state', {}));
 const saveCfg = () => LS.set('cet6.cfg', cfg);
-// 保存前先和存储里已有的数据合并（同时开着两个页面时，旧页面不会把新进度覆盖掉）
-function saveState() {
-  const cur = LS.get('cet6.state', null);
-  if (cur && cur.words) {
-    try {
-      const days = {};
-      new Set(Object.keys(cur.dayLocal || {}).concat(Object.keys(cur.dayRemote || {}))).forEach(d => {
-        days[d] = Object.assign({}, (cur.dayRemote || {})[d] || {});
-        if (cur.dayLocal && cur.dayLocal[d]) days[d][dev] = cur.dayLocal[d];
-      });
-      mergeDoc({ words: cur.words, days, xp: Object.assign({ [dev]: cur.xpLocal || 0 }, cur.xpRemote || {}), achv: cur.achv, best: cur.best, goal: cur.goal });
-    } catch (e) {}
-  }
-  LS.set('cet6.state', S);
-}
+const saveState = () => LS.set('cet6.state', S);
 
 // 扫电脑上的二维码打开：#t=token（测试时还可以带 api=）
 (function readHash() {
@@ -393,23 +379,23 @@ function newWords(n) {
   else un.sort((a, b) => a.rank - b.rank);
   return un.slice(0, n);
 }
-// 错题本：错得多的优先；错的次数一样时，最久没练的优先（刚练过的排到后面，下次接着往后刷）
-function wrongList() {
+function wrongWords() {
   return Object.keys(S.words).filter(w => IDX[w] && S.words[w][4] >= 1 && S.words[w][0] <= 5)
-    .sort((a, b) => (S.words[b][4] - S.words[a][4]) || (S.words[a][7] - S.words[b][7]));
-}
-function wrongWords() { return wrongList().slice(0, 30).map(w => IDX[w]); }
-// 快刷：先刷今天到期的，再按“最久没练过”往后轮，每轮 30 个，所有学过的词都会轮到
-function quickList() {
-  const t = today(), learned = Object.keys(S.words).filter(w => IDX[w] && S.words[w][0] >= 1 && S.words[w][0] <= 8);
-  const due = learned.filter(w => S.words[w][1] <= t).sort((a, b) => (S.words[a][1] < S.words[b][1] ? -1 : S.words[a][1] > S.words[b][1] ? 1 : 0) || (S.words[a][7] - S.words[b][7]));
-  const rest = learned.filter(w => S.words[w][1] > t).sort((a, b) => S.words[a][7] - S.words[b][7]);
-  return due.concat(rest);
+    .sort((a, b) => (S.words[b][4] - S.words[a][4]) || (S.words[b][6] > S.words[a][6] ? 1 : -1)).slice(0, 30).map(w => IDX[w]);
 }
 function buildQueue(mode, extra) {
   const q = [], item = (w, k) => ({ w, kind: k });
   if (mode === 'wrong') return wrongWords().map(w => item(w, 'wrong'));
-  if (mode === 'quick') return quickList().slice(0, 30).map(w => item(IDX[w], 'quick'));
+  if (mode === 'quick') {
+    let list = dueWords();
+    if (list.length < 10) {
+      const seen = new Set(list.map(w => w.w));
+      const more = Object.keys(S.words).filter(w => IDX[w] && !seen.has(w) && S.words[w][0] >= 1 && S.words[w][0] <= 8)
+        .sort((a, b) => S.words[a][1] < S.words[b][1] ? -1 : 1).map(w => IDX[w]);
+      list = list.concat(more);
+    }
+    return list.slice(0, 30).map(w => item(w, 'quick'));
+  }
   const due = dueWords(), news = mode === 'review' ? [] : newWords(quota() + (extra || 0));
   let ri = 0, ni = 0;
   while (ri < due.length || ni < news.length) {
@@ -427,11 +413,7 @@ function updateState(w, grade, kind, secs) {
   s[2]++; s[6] = t; s[7] = Date.now();
   if (grade === 'kill') { s[0] = 9; s[1] = '9999-12-31'; addDay(5, 1); return; }
   addDay(isNew ? 0 : 1, 1);
-  if (grade === 'perfect') {
-    s[3]++; addDay(2, 1);
-    if (!keep) s[0] = isNew ? 3 : Math.min(s[0] + 1, 8);
-    if (kind === 'wrong') s[4] = Math.max(0, s[4] - 1);     // 错题本里答对一次，错误次数减 1，减到 0 就移出错题本
-  }
+  if (grade === 'perfect') { s[3]++; addDay(2, 1); if (!keep) s[0] = isNew ? 3 : Math.min(s[0] + 1, 8); }
   else if (grade === 'hard') { if (!keep) s[0] = isNew ? 1 : Math.max(1, s[0] - 1); }
   else { s[4]++; addDay(3, 1); s[0] = 1; }
   if (!keep || grade === 'fail') s[1] = addDays(t, IV[s[0]]);
@@ -745,8 +727,7 @@ function installCard() {
 /* ================= 首页 ================= */
 function renderHome() {
   stopLoop(); sess = null; cur = null; header(); chipIdle();
-  const c = counts(), q = quota(), wrong = wrongList().length, remain = c.total - c.learned;
-  const ql = quickList(), quickLeft = ql.filter(w => S.words[w][6] !== today()).length;
+  const c = counts(), q = quota(), wrong = wrongWords().length, remain = c.total - c.learned;
   const finish = remain > 0 ? addDays(today(), Math.ceil(remain / Math.max(1, cfg.dailyNew))) : '';
   const syncLine = cfg.token
     ? '<div class="syncrow"><span class="note">云同步已开启' + (cfg.lastSync ? '' : '，还没同步过') + '</span><button id="hSync">立即同步</button></div>'
@@ -755,8 +736,8 @@ function renderHome() {
   setView('home', ask + installCard() + '<section class="card home"><div class="meta"><span class="tag">今日任务</span><span>' + today() + '</span></div>'
     + '<h2>复习 <b>' + c.due + '</b> · 新词 <b>' + q + '</b></h2>'
     + '<button class="primary" id="goSpell">✍️ 拼写练习</button>'
-    + '<button class="ghost2" id="goQuick">⚡ 快刷复习 <small>' + (ql.length ? '今天还有 ' + quickLeft + ' 个没刷' : '看英文选中文，单手刷') + '</small></button>'
-    + '<button class="ghost2" id="goWrong">📕 错题本 <small>' + wrong + ' 个' + (wrong > 30 ? '（每轮 30 个）' : '') + '</small></button></section>'
+    + '<button class="ghost2" id="goQuick">⚡ 快刷复习 <small>看英文选中文，单手刷</small></button>'
+    + '<button class="ghost2" id="goWrong">📕 错题本 <small>' + wrong + ' 个</small></button></section>'
     + '<section class="card"><div class="nums"><div><b>' + c.learned + '</b><span>已学 / ' + c.total + '</span></div><div><b>' + c.mastered + '</b><span>已掌握</span></div><div><b>' + streak() + '</b><span>连续打卡</span></div></div>'
     + (finish ? '<div class="note">按每天 ' + cfg.dailyNew + ' 个新词，预计 <b>' + finish + '</b> 学完全部新词</div>' : '<div class="note">全部新词都学过了，接下来按计划复习</div>')
     + '</section><section class="card">' + syncLine + '</section>');
@@ -860,10 +841,6 @@ function finish(grade) {
   updateState(w, grade, it.kind, secs);
   addXp(xp);
   if (combo > S.best) S.best = combo;
-  if (it.kind === 'wrong' && grade === 'perfect') {
-    const left = S.words[w.w][4];
-    toast(left === 0 ? '✅ ' + w.w + ' 已移出错题本' : w.w + ' 再答对 ' + left + ' 次就移出错题本');
-  }
   checkAchv({ grade, secs, len: w.w.length });
   if (it.kind !== 'relearn' && grade !== 'kill') { sess.n++; if (grade === 'perfect') sess.ok++; }
   saveState(); saveCfg();
@@ -897,7 +874,7 @@ function sessionDone() {
   setView('done', '<section class="card home"><div class="meta"><span class="tag review">完成</span><span>' + (sess.mode === 'wrong' ? '错题本' : '本轮') + '</span></div>'
     + '<h2>🎉 这一轮背完了</h2>' + bonus
     + '<div class="nums"><div><b>' + sess.n + '</b><span>答题</span></div><div><b>' + pct + '%</b><span>一次答对</span></div><div><b>+' + sess.xp + '</b><span>XP</span></div></div>'
-    + '<div class="note">用时约 ' + mins + ' 分钟。' + (sess.mode === 'quick' ? '下一轮会接着刷最久没练过的词。' : sess.mode === 'wrong' ? '错题本还剩 ' + wrongList().length + ' 个，下一轮接着刷没练过的。' : '答错的词明天会再考。') + '</div></section>'
+    + '<div class="note">用时约 ' + mins + ' 分钟。答错的词明天会再考。</div></section>'
     + (more ? '<button class="primary" id="dMore">再来 10 个新词</button>' : '') + '<button class="ghost" id="dHome">回首页</button>'
     + (lastRes ? '<section class="res" id="res"></section>' : ''));
   if (lastRes) { const el = $('res'); el.innerHTML = resultHtml(lastRes); el.querySelectorAll('[data-say]').forEach(b => b.onclick = () => speak(b.dataset.say === 'w' ? lastRes.w.w : lastRes.sent, 0.9)); }
