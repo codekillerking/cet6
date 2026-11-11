@@ -154,6 +154,8 @@ input{font:inherit}
 .home h2{margin:2px 0 9px;font-size:21px}
 .home h2 b{color:var(--accent)}
 .primary{display:block;width:100%;padding:13px;border-radius:14px;background:linear-gradient(135deg,#6f7dff,#a77bff);color:#fff;font-weight:800;font-size:17px;margin-bottom:9px}
+a.primary{text-align:center;text-decoration:none}
+.linkcard{border-color:rgba(139,156,255,.55)}
 .primary:disabled{opacity:.55}
 .ghost2{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;padding:12px 13px;border-radius:14px;border:1px solid var(--line);background:#121620;margin-bottom:9px;font-size:16px;font-weight:650;text-align:left}
 .ghost2 span{flex:none}
@@ -253,7 +255,7 @@ details.paste textarea{display:block;width:100%;margin:6px 0 8px;border-radius:1
 <script>
 (() => {
 'use strict';
-const APP_VER = '2026.11.11';
+const APP_VER = '2026.11.11.2';
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const SEC = String.fromCharCode(167);
@@ -287,7 +289,8 @@ delete cfg.loop; delete cfg.sent;
 let dev = LS.get('cet6.dev', '');
 if (!dev) { dev = 'ph-' + Math.random().toString(36).slice(2, 10); LS.set('cet6.dev', dev); }
 // 单词状态与同步文件同一格式：[等级, 下次复习, 次数, 一次答对, 答错, 首次, 最近, 修改时间]
-const S = Object.assign({ words: {}, dayLocal: {}, dayRemote: {}, xpLocal: 0, xpRemote: {}, achv: [], best: 0, goal: '', book: null, pos: {} }, LS.get('cet6.state', {}));
+const S = Object.assign({ words: {}, dayLocal: {}, dayRemote: {}, xpLocal: 0, xpRemote: {}, achv: [], best: 0, goal: '', book: null, pos: {}, links: {} }, LS.get('cet6.state', {}));
+if (!S.links || typeof S.links !== 'object') S.links = {};
 S.words = Object.assign(Object.create(null), S.words || {});      // 不带原型：单词叫 constructor 之类也不会出错
 if (!S.pos || typeof S.pos !== 'object') S.pos = {};
 const saveCfg = () => LS.set('cet6.cfg', cfg);
@@ -301,7 +304,7 @@ function saveState() {
         days[d] = Object.assign({}, (old.dayRemote || {})[d] || {});
         if (old.dayLocal && old.dayLocal[d]) days[d][dev] = old.dayLocal[d];
       });
-      mergeDoc({ words: old.words, days, xp: Object.assign({ [dev]: old.xpLocal || 0 }, old.xpRemote || {}), achv: old.achv, best: old.best, goal: old.goal, book: old.book, pos: old.pos });
+      mergeDoc({ words: old.words, days, xp: Object.assign({ [dev]: old.xpLocal || 0 }, old.xpRemote || {}), achv: old.achv, best: old.best, goal: old.goal, book: old.book, pos: old.pos, links: old.links });
     } catch (e) {}
   }
   LS.set('cet6.state', S);
@@ -750,6 +753,12 @@ function mergeDoc(doc) {
   // 当前词书、刷词书的位置：以最后改动的那台设备为准
   if (Array.isArray(doc.book) && doc.book[0] && (!S.book || +doc.book[1] > +S.book[1])) S.book = doc.book.slice(0, 2);
   for (const id in (doc.pos || {})) { const a = doc.pos[id]; if (Array.isArray(a) && (!S.pos[id] || +a[1] > +S.pos[id][1])) S.pos[id] = a.slice(0, 2); }
+  // 电脑的联动地址（电脑开联动时写进来）：每台电脑以较新的为准；只认 http://IP:端口/四位密钥 这种地址
+  for (const dv in (doc.links || {})) {
+    const a = doc.links[dv];
+    if (!a || typeof a !== 'object' || (S.links[dv] && +a.at <= +S.links[dv].at)) continue;
+    S.links[dv] = { on: a.on === true, at: +a.at || 0, urls: (Array.isArray(a.urls) ? a.urls : []).filter(u => typeof u === 'string' && /^http:\/\/[0-9A-Za-z.-]+:\d{2,5}\/[a-z0-9]{4}$/.test(u)).slice(0, 4) };
+  }
   return changed;
 }
 function buildDoc() {
@@ -762,6 +771,7 @@ function buildDoc() {
   });
   const doc = { v: 1, words: S.words, days, xp: Object.assign({ [dev]: S.xpLocal }, S.xpRemote), achv: S.achv, best: S.best, goal: S.goal || '', pos: S.pos };
   if (S.book) doc.book = S.book;
+  if (Object.keys(S.links).length) doc.links = S.links;      // 原样带回去，别把电脑写的联动地址弄丢
   return doc;
 }
 function setChip(text, bad) { const c = $('syncChip'); c.textContent = '☁️ ' + text; c.classList.toggle('bad', !!bad); }
@@ -830,7 +840,7 @@ async function adoptToken(tok, how) {
   return sync(false);
 }
 window.addEventListener('online', () => sync(true));
-document.addEventListener('visibilitychange', () => { if (document.hidden) { saveState(); if (cfg.dirty) sync(true); } else { chipIdle(); if (cfg.token && Date.now() - cfg.lastSync > 60000) sync(true); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { saveState(); if (cfg.dirty) sync(true); } else { chipIdle(); if (cfg.token && Date.now() - cfg.lastSync > 15000) sync(true); } });   // 切回 App 时顺便看看电脑开没开联动
 setInterval(chipIdle, 30000);
 
 /* ================= 界面：公共 ================= */
@@ -948,7 +958,7 @@ function renderHome() {
     ? '<div class="syncrow"><span class="note">云同步已开启' + (cfg.lastSync ? '' : '，还没同步过') + '</span><button id="hSync">立即同步</button></div>'
     : '<div class="syncrow"><span class="note">没开云同步：手机和电脑进度不会合并</span><button id="hSet">去设置</button></div>';
   const ask = cfg.soundAsked ? '' : '<div class="card"><div class="note">戴着耳机吗？开声音后，新题会先读中文意思、再循环读英文，拼对后读例句（设置里可以分别开关）。</div><div class="ask"><button id="sOn">🎧 开声音</button><button id="sOff">🔇 先静音</button></div></div>';
-  setView('home', ask + backupCard() + installCard() + '<section class="card home">'
+  setView('home', linkCard() + ask + backupCard() + installCard() + '<section class="card home">'
     + '<div class="bookbar"><span>📚 <b>' + esc(bookInfo().name) + '</b></span><button id="chgBook">换词书</button></div>'
     + '<h2>复习 <b>' + c.due + '</b> · 新词 <b>' + q + '</b></h2>'
     + (q === 0 && c.inBook < c.total ? '<div class="note" style="margin:-4px 0 9px">今天的新词名额用完了（刷词书时点“不认识”的词也算新词）。还想学可以在设置里调高。</div>' : '')
@@ -1459,6 +1469,19 @@ async function importBackup(text, back) {
   toast(changed ? '已恢复：更新了 ' + changed + ' 个词的进度' : '已恢复：备份里的进度这台手机上都有了');
   if (cfg.token) sync(true);
   return true;
+}
+// 首页：电脑开着联动（12 小时内开的、还没关）→ 一键跳到电脑的联动页面，不用扫码
+function linkCard() {
+  if (!cfg.token) return '';
+  const now = Date.now();
+  const on = Object.keys(S.links).map(d => S.links[d]).filter(l => l.on && l.urls.length && now - l.at < 12 * 3600e3).sort((a, b) => b.at - a.at);
+  if (!on.length) return '';
+  const l = on[0], t = new Date(l.at), when = (fmtDate(t) === today() ? '' : (t.getMonth() + 1) + '/' + t.getDate() + ' ') + pad(t.getHours()) + ':' + pad(t.getMinutes());
+  const alt = l.urls.slice(1).map((u, i) => '<a href="' + esc(u) + '" target="_blank" rel="noopener">地址 ' + (i + 2) + '</a>').join(' · ');
+  return '<div class="card linkcard"><div class="meta"><span class="tag">🎧 电脑开着联动</span><span>' + esc(when) + ' 开的</span></div>'
+    + '<div class="note">手机读音、显示题目，电脑上打字。手机要和电脑连同一个 Wi-Fi（或连电脑开的热点）。</div>'
+    + '<a class="primary" id="goLink" href="' + esc(l.urls[0]) + '" target="_blank" rel="noopener" style="margin:10px 0 0">🔗 连上电脑</a>'
+    + '<div class="note" style="margin-top:8px">打不开：看看电脑上的程序还开着没有、是不是同一个 Wi-Fi' + (alt ? '；也可以试试 ' + alt : '') + '。</div></div>';
 }
 // 首页提醒：没开云同步、学了一些词、一周没备份
 function backupCard() {
