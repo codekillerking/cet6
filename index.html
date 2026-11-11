@@ -26,7 +26,8 @@ html,body{margin:0;background:var(--bg);color:var(--text)}
 body{font:16px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","MiSans","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
   min-height:100vh;padding:calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 28px);
   overscroll-behavior:none;-webkit-text-size-adjust:100%;touch-action:manipulation}
-body.dim{filter:brightness(.55)}
+/* 调暗：盖一层半透明黑色（不用 filter：filter 会让底部固定的键盘、设置面板跑到整页最下面） */
+body.dim::after{content:"";position:fixed;inset:0;background:#000;opacity:.45;pointer-events:none;z-index:200}
 [hidden]{display:none!important}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 button:disabled{cursor:default}
@@ -181,7 +182,7 @@ a.primary{text-align:center;text-decoration:none}
 #lvl .big{font-size:15px;letter-spacing:6px;color:var(--xp);font-weight:800}
 #lvl .lv{font-size:54px;font-weight:900;background:linear-gradient(135deg,#8b9cff,#e08bff);-webkit-background-clip:text;background-clip:text;color:transparent;animation:zoom .6s cubic-bezier(.2,1.4,.4,1)}
 #sheet{background:rgba(0,0,0,.55);align-items:flex-end}
-#sheet .panel{width:100%;max-height:88vh;overflow:auto;background:var(--card);border-radius:20px 20px 0 0;padding:16px 18px calc(env(safe-area-inset-bottom) + 16px);border-top:1px solid var(--line)}
+#sheet .panel{width:100%;max-height:88vh;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;background:var(--card);border-radius:20px 20px 0 0;padding:16px 18px calc(env(safe-area-inset-bottom) + 16px);border-top:1px solid var(--line)}
 #sheet h3{display:flex;justify-content:space-between;margin:0 0 4px;font-size:16px}
 #sheet h3 button{color:var(--muted);font-size:14px}
 #sheet h4{margin:16px 0 2px;font-size:13px;color:var(--dim);font-weight:600}
@@ -255,7 +256,7 @@ details.paste textarea{display:block;width:100%;margin:6px 0 8px;border-radius:1
 <script>
 (() => {
 'use strict';
-const APP_VER = '2026.11.11.2';
+const APP_VER = '2026.11.11.3';
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const SEC = String.fromCharCode(167);
@@ -957,7 +958,7 @@ function renderHome() {
   const syncLine = cfg.token
     ? '<div class="syncrow"><span class="note">云同步已开启' + (cfg.lastSync ? '' : '，还没同步过') + '</span><button id="hSync">立即同步</button></div>'
     : '<div class="syncrow"><span class="note">没开云同步：手机和电脑进度不会合并</span><button id="hSet">去设置</button></div>';
-  const ask = cfg.soundAsked ? '' : '<div class="card"><div class="note">戴着耳机吗？开声音后，新题会先读中文意思、再循环读英文，拼对后读例句（设置里可以分别开关）。</div><div class="ask"><button id="sOn">🎧 开声音</button><button id="sOff">🔇 先静音</button></div></div>';
+  const ask = cfg.soundAsked ? '' : '<div class="card"><div class="note">戴着耳机吗？开声音后，新题会先读一遍中文意思，再循环读英文，直到拼对。想拼对后听例句，到 ⚙️ 里打开“拼对后读例句”。</div><div class="ask"><button id="sOn">🎧 开声音</button><button id="sOff">🔇 先静音</button></div></div>';
   setView('home', linkCard() + ask + backupCard() + installCard() + '<section class="card home">'
     + '<div class="bookbar"><span>📚 <b>' + esc(bookInfo().name) + '</b></span><button id="chgBook">换词书</button></div>'
     + '<h2>复习 <b>' + c.due + '</b> · 新词 <b>' + q + '</b></h2>'
@@ -981,7 +982,7 @@ function renderHome() {
   const hset = $('hSet'); if (hset) hset.onclick = openSheet;
   const bn = $('bkNow'); if (bn) bn.onclick = () => openBackup();
   const bl = $('bkLater'); if (bl) bl.onclick = () => { cfg.backupSnooze = Date.now() + 3 * 864e5; saveCfg(); renderHome(); };
-  const on = $('sOn'); if (on) on.onclick = () => { unlockAudio(); Object.assign(cfg, { soundAsked: true, autoZh: true, autoEn: true, loopEn: true, autoSent: true, sfx: true }); saveCfg(); speak('ready', 0.9); renderHome(); };
+  const on = $('sOn'); if (on) on.onclick = () => { unlockAudio(); Object.assign(cfg, { soundAsked: true, autoZh: true, autoEn: true, loopEn: true, sfx: true }); saveCfg(); speak('ready', 0.9); renderHome(); };
   const off = $('sOff'); if (off) off.onclick = () => { Object.assign(cfg, { soundAsked: true, autoZh: false, autoEn: false, autoSent: false, say: false, sfx: false }); saveCfg(); renderHome(); };
 }
 function openBooks() {
@@ -1358,6 +1359,20 @@ function renderSheet() {
 }
 const sheetBg = e => { if (e.target.id === 'sheet') closeSheet(); };
 $('sheet').onclick = sheetBg;
+// 设置等底部面板打开时锁住后面的页面：手指在面板上滑，后面不跟着动
+let scrollLockY = null;
+function lockScroll(on) {
+  const b = document.body;
+  if (on && scrollLockY === null) {
+    scrollLockY = window.scrollY;
+    Object.assign(b.style, { position: 'fixed', top: -scrollLockY + 'px', left: '0', right: '0' });
+  } else if (!on && scrollLockY !== null) {
+    const y = scrollLockY; scrollLockY = null;
+    Object.assign(b.style, { position: '', top: '', left: '', right: '' });
+    window.scrollTo(0, y);
+  }
+}
+new MutationObserver(() => lockScroll($('sheet').classList.contains('show'))).observe($('sheet'), { attributes: true, attributeFilter: ['class'] });
 // 底部弹出一个“确定 / 取消”的确认框，返回 true / false
 function askSheet(html, okText, noText) {
   return new Promise(res => {
